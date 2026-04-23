@@ -1,8 +1,20 @@
+require("dotenv").config();
+
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
 
-const MONGODB_URI = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/fooduhh";
+const app = express();
+const PORT = process.env.PORT || 5000;
+const MONGODB_URI = process.env.MONGODB_URI;
+const JWT_SECRET = process.env.JWT_SECRET || "secretkey";
+
+if (!MONGODB_URI) {
+  console.error("Missing MONGODB_URI environment variable");
+  process.exit(1);
+}
 
 const foodSchema = new mongoose.Schema(
   {
@@ -20,18 +32,106 @@ const foodSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+const userSchema = new mongoose.Schema(
+  {
+    email: {
+      type: String,
+      required: true,
+      unique: true,
+      trim: true,
+      lowercase: true
+    },
+    password: {
+      type: String,
+      required: true
+    }
+  },
+  { timestamps: true }
+);
+
 const Food = mongoose.model("Food", foodSchema);
+const User = mongoose.model("User", userSchema);
 
-
-const express = require("express");
-const cors = require("cors");  
-
-const app = express();
-
-app.use(cors());                
+app.use(cors());
 app.use(express.json());
 
-app.get("/foods", async (req, res) => {
+const authMiddleware = (req, res, next) => {
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : authHeader;
+
+  if (!token) {
+    return res.status(401).json({ message: "No token" });
+  }
+
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch (error) {
+    res.status(401).json({ message: "Invalid token" });
+  }
+};
+
+app.get("/health", (req, res) => {
+  res.json({ ok: true });
+});
+
+app.post("/register", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ message: "Email and password are required" });
+    }
+
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    if (existingUser) {
+      return res.status(409).json({ message: "User already exists" });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const user = new User({
+      email,
+      password: hashedPassword
+    });
+
+    await user.save();
+    res.status(201).json({ message: "User registered" });
+  } catch (error) {
+    res.status(500).json({ message: "Register failed", error: error.message });
+  }
+});
+
+app.post("/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ message: "Email and password are required" });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res.status(401).json({ message: "Wrong password" });
+    }
+
+    const token = jwt.sign(
+      { userId: user._id, email: user.email },
+      JWT_SECRET,
+      { expiresIn: "1d" }
+    );
+
+    res.json({ token });
+  } catch (error) {
+    res.status(500).json({ message: "Login failed", error: error.message });
+  }
+});
+
+app.get("/foods", authMiddleware, async (req, res) => {
   try {
     const foods = await Food.find().sort({ createdAt: -1 });
     res.json(foods);
@@ -40,9 +140,13 @@ app.get("/foods", async (req, res) => {
   }
 });
 
-app.post("/foods", async (req, res) => {
+app.post("/foods", authMiddleware, async (req, res) => {
   try {
     const { name, price } = req.body;
+
+    if (!name || price === undefined) {
+      return res.status(400).json({ message: "Name and price are required" });
+    }
 
     const newFood = new Food({
       name,
@@ -56,20 +160,7 @@ app.post("/foods", async (req, res) => {
   }
 });
 
-app.delete("/foods/:id", async (req, res) => {
-  try {
-    const deletedFood = await Food.findByIdAndDelete(req.params.id);
-    if (!deletedFood) {
-      return res.status(404).json({ message: "Food not found" });
-    }
-
-    res.json({ message: "Deleted" });
-  } catch (error) {
-    res.status(400).json({ message: "Failed to delete food", error: error.message });
-  }
-});
-
-app.put("/foods/:id", async (req, res) => {
+app.put("/foods/:id", authMiddleware, async (req, res) => {
   try {
     const { name, price } = req.body;
 
@@ -89,8 +180,18 @@ app.put("/foods/:id", async (req, res) => {
   }
 });
 
-app.get("/health", (req, res) => {
-  res.json({ ok: true });
+app.delete("/foods/:id", authMiddleware, async (req, res) => {
+  try {
+    const deletedFood = await Food.findByIdAndDelete(req.params.id);
+
+    if (!deletedFood) {
+      return res.status(404).json({ message: "Food not found" });
+    }
+
+    res.json({ message: "Deleted" });
+  } catch (error) {
+    res.status(400).json({ message: "Failed to delete food", error: error.message });
+  }
 });
 
 const startServer = async () => {
@@ -98,8 +199,8 @@ const startServer = async () => {
     await mongoose.connect(MONGODB_URI);
     console.log("MongoDB connected");
 
-    app.listen(5000, () => {
-      console.log("Server running on port 5000");
+    app.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
     });
   } catch (error) {
     console.error("Failed to connect MongoDB:", error.message);
@@ -107,134 +208,4 @@ const startServer = async () => {
   }
 };
 
-
-// login store in mongodb 
-
-const userSchema = new mongoose.Schema({
-  email: String,
-  password: String
-});
-
-const User = mongoose.model("User", userSchema);
-
-
-// register api
-
-const bcrypt = require("bcryptjs");
-
-app.post("/register", async (req, res) => {
-  const hashedPassword = await bcrypt.hash(req.body.password, 10);
-
-  const user = new User({
-    email: req.body.email,
-    password: hashedPassword
-  });
-
-  await user.save();
-  res.json({ message: "User registered" });
-});
-
-
-// login api
-const jwt = require("jsonwebtoken");
-
-app.post("/login", async (req, res) => {
-  const user = await User.findOne({ email: req.body.email });
-
-  if (!user) return res.json({ message: "User not found" });
-
-  const isMatch = await bcrypt.compare(req.body.password, user.password);
-
-  if (!isMatch) return res.json({ message: "Wrong password" });
-
-  const token = jwt.sign(
-    { userId: user._id },
-    "secretkey"
-  );
-
-  res.json({ token });
-});
-
-// middleware to verify token
-const authMiddleware = (req, res, next) => {
-  const token = req.headers.authorization;
-
-  if (!token) return res.json({ message: "No token" });
-
-  try {
-    const decoded = jwt.verify(token, "secretkey");
-    req.user = decoded;
-    next();
-  } catch {
-    res.json({ message: "Invalid token" });
-  }
-};
-
-// pretect api
-
-app.get("/foods", authMiddleware, async (req, res) => {
-  const foods = await Food.find();
-  res.json(foods);
-});
-
-// for deployment
-
-const PORT = process.env.PORT || 5000;
-
-app.listen(PORT, () => {
-  console.log("Server running");
-});
-
-
 startServer();
-
-
-
-
-
-
-
-
-// here in array we will store our food items, in real world we will use database to store data
-
-// // Sample data (food items)
-// let foods = [
-//   { id: 1, name: "Pizza", price: 200 },
-//   { id: 2, name: "Burger", price: 150 }
-// ];
-
-// // GET - get all food items
-// app.get("/foods", (req, res) => {
-//   res.json(foods);
-// });
-
-// // POST - add new food
-// app.post("/foods", (req, res) => {
-//   const newFood = {
-//     id: foods.length + 1,
-//     name: req.body.name,
-//     price: req.body.price
-//   };
-//   foods.push(newFood);
-//   res.json(newFood);
-// });
-
-// //EDIT - update food
-// app.put("/foods/:id", (req, res) => {
-//   const id = parseInt(req.params.id);
-
-//   foods = foods.map(food =>
-//     food.id === id
-//       ? { ...food, name: req.body.name, price: req.body.price }
-//       : food
-//   );
-
-//   res.json({ message: "Updated" });
-// });
-
-// // DELETE - remove food
-// app.delete("/foods/:id", (req, res) => {
-//   const id = parseInt(req.params.id);
-//   foods = foods.filter(food => food.id !== id);
-//   res.json({ message: "Deleted" });
-// });

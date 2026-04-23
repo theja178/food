@@ -133,9 +133,10 @@ function App() {
         throw new Error("Failed to add food");
       }
 
+      const createdFood = await response.json();
       resetFoodForm();
-      await fetchFoods();
-      setMessage("Food added successfully");
+      setFoods((currentFoods) => [createdFood, ...currentFoods]);
+      setMessage("Food saved in Atlas");
     } catch (err) {
       setError(err.message || "Something went wrong");
     } finally {
